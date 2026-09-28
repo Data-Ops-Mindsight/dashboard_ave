@@ -1,0 +1,10 @@
+# Tema visual do dashboard -- NAO e sensivel, pode/deve ir pro Git
+# (diferente de secrets.toml, que fica no mesmo diretorio mas nunca commitado)
+
+[theme]
+base = "light"
+primaryColor = "#6C5CE7"
+backgroundColor = "#F7F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1A1A2E"
+font = "sans serif"

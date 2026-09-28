@@ -1,0 +1,12 @@
+[
+  {
+    "tenant": "somosglobal",
+    "display_name": "Somos Global",
+    "evaluation_round_id": "2"
+  },
+  {
+    "tenant": "singlo",
+    "display_name": "Singlo",
+    "evaluation_round_id": "2"
+  }
+]

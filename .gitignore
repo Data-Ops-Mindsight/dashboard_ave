@@ -1,0 +1,17 @@
+# Segredos -- NUNCA commitar. .streamlit/config.toml (tema) fica de fora
+# dessa regra de propósito, ele pode e deve ir pro repositório.
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Ambiente virtual
+venv/
+.venv/
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
