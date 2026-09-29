@@ -66,11 +66,22 @@ def make_session(auth_url: str, tenant: str) -> ApiSession:
 
 
 def get_with_reauth(api_session: ApiSession, url: str) -> requests.Response:
-    """GET que refaz o login 1x se o access token tiver expirado."""
-    resp = api_session.session.get(url, timeout=30)
-    if resp.status_code == 401:
+    """GET que refaz o login 1x se a sessao tiver expirado.
+
+    Trata dois sintomas de sessao expirada: status 401 (comum), e loop de
+    redirecionamento (TooManyRedirects) -- alguns endpoints redirecionam pra
+    uma tela de login em vez de responder 401 quando o token nao e mais
+    valido, o que o requests enxerga como "redirecionado demais" em vez de
+    um status de erro claro."""
+    try:
+        resp = api_session.session.get(url, timeout=30)
+    except requests.exceptions.TooManyRedirects:
         apply_auth(api_session.session, authenticate(api_session.auth_url, api_session.tenant))
         resp = api_session.session.get(url, timeout=30)
+    else:
+        if resp.status_code == 401:
+            apply_auth(api_session.session, authenticate(api_session.auth_url, api_session.tenant))
+            resp = api_session.session.get(url, timeout=30)
     resp.raise_for_status()
     return resp
 

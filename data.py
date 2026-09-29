@@ -35,7 +35,7 @@ def load_clients(config_path: str = DEFAULT_CLIENTS_CONFIG_PATH) -> list[dict]:
     return clients
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, ttl=1800)
 def get_api_session(auth_url: str, tenant: str) -> ApiSession:
     return make_session(auth_url, tenant)
 
