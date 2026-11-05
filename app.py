@@ -158,7 +158,7 @@ with ctrl_cols[0]:
 with ctrl_cols[2]:
     st.caption(f"👤 {st.session_state.authenticated_user}")
 with ctrl_cols[3]:
-    if st.button("Sair", use_container_width=True):
+    if st.button("Sair", width="stretch"):
         st.session_state.authenticated_user = None
         st.session_state.allowed_tenants = None
         st.rerun()
@@ -204,7 +204,7 @@ with f_col2:
         key=f"gestor_filter_{st.session_state.filter_reset_counter}", label_visibility="collapsed")
 with f_col3:
     st.caption("​")
-    if st.button("🔄 Limpar filtros", use_container_width=True):
+    if st.button("🔄 Limpar filtros", width="stretch"):
         st.session_state.filter_reset_counter += 1
         st.rerun()
 
@@ -259,7 +259,7 @@ def show_people_for_grades(rows: pd.DataFrame, label: str):
     table = table.rename(columns={"answer": "Resposta"})
     table = table[["Colaborador(a)", "Gestor(a)", "Etapa", "Resposta"]].drop_duplicates()
     st.markdown(f"**{label} — {len(table)} registro(s)**")
-    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.dataframe(table, width="stretch", hide_index=True)
 
 
 def mostrar_pessoas_ao_clicar_rosquinha(fig: go.Figure, respostas: pd.DataFrame, chave: str):
@@ -351,7 +351,7 @@ def clickable_results(
     revision_key = f"{key}_selection_revision"
     table_key = f"{key}_{st.session_state.get(revision_key, 0)}" if search_query is not None else key
     selection = st.dataframe(
-        counts, use_container_width=True, hide_index=True,
+        counts, width="stretch", hide_index=True,
         on_select="rerun", selection_mode="single-row", key=table_key,
     )
     selected_value = None
@@ -386,7 +386,7 @@ def clickable_pair_details(rows: pd.DataFrame, key: str):
         st.info("Nenhuma avaliação para o filtro selecionado.")
         return
     st.dataframe(rows.drop(columns=["_key"], errors="ignore"),
-                 use_container_width=True, hide_index=True, key=key)
+                 width="stretch", hide_index=True, key=key)
 
 
 tab_overview, tab_progress, tab_competency, tab_evolution, tab_decision = st.tabs([
@@ -516,7 +516,7 @@ with tab_progress:
         if search_name:
             person_df = person_df[person_df["Participante"].str.contains(search_name, case=False, regex=False, na=False)]
         person_df = person_df.reset_index(drop=True)
-        event = st.dataframe(person_df.drop(columns=["_key"]), hide_index=True, use_container_width=True,
+        event = st.dataframe(person_df.drop(columns=["_key"]), hide_index=True, width="stretch",
             on_select="rerun", selection_mode="single-row", key="people_pending_table",
             column_config={"% Conclusão": st.column_config.ProgressColumn(
                 "% Conclusão", min_value=0, max_value=100, format="%d%%")})
@@ -557,7 +557,7 @@ with tab_competency:
             title="Gestor x Colaborador — mesma escala, mesmos eixos",
             showlegend=True,
         )
-        st.plotly_chart(fig_radar, use_container_width=True)
+        st.plotly_chart(fig_radar, width="stretch")
 
         with st.expander("👥 Clique na competência para conferir pessoas e notas"):
             detail = competency_df.copy()
@@ -566,14 +566,14 @@ with tab_competency:
                 .agg(**{"Nota média": ("score", "mean"), "Pessoas": ("evaluated_key", "nunique")}))
             aggregated["Nota média"] = aggregated["Nota média"].round(2)
             aggregated = aggregated.rename(columns={"respondent": "Responsável", "label": "Competência"})
-            selection = st.dataframe(aggregated, hide_index=True, use_container_width=True,
+            selection = st.dataframe(aggregated, hide_index=True, width="stretch",
                 on_select="rerun", selection_mode="single-row", key="competency_group_rows")
             if selection.selection.rows and selection.selection.rows[0] < len(aggregated):
                 line = aggregated.iloc[selection.selection.rows[0]]
                 individual = detail[(detail["respondent"] == line["Responsável"]) &
                                     (detail["label"] == line["Competência"])]
                 st.dataframe(individual[["Colaborador(a)", "round", "score"]].rename(columns={"round":"Etapa", "score":"Nota"}),
-                    hide_index=True, use_container_width=True)
+                    hide_index=True, width="stretch")
 
         st.markdown("**O que isso quer dizer, em números:**")
         for label in COMPETENCY_ORDER:
@@ -643,7 +643,7 @@ with tab_evolution:
             eval_rows["Colaborador(a)"] = eval_rows["evaluated_key"].map(people_by_key).fillna("Nome indisponível")
             st.dataframe(eval_rows[["Colaborador(a)", "respondent", "round", "score"]].rename(
                 columns={"respondent": "Responsável", "round": "Etapa", "score": "Nota"}),
-                use_container_width=True, hide_index=True)
+                width="stretch", hide_index=True)
 
 # ---------------------------------------------------------------------------
 # Aba: Decisão Final e Intenção
@@ -696,7 +696,7 @@ with tab_decision:
             fig_sat.update_traces(textposition="outside")
             fig_sat.update_layout(showlegend=False)
             with col_sat:
-                st.plotly_chart(fig_sat, use_container_width=True)
+                st.plotly_chart(fig_sat, width="stretch")
                 clickable_results(sat_rows, "satisfaction_results")
 
         intention_rows2 = grades_df[
@@ -739,5 +739,5 @@ with tab_decision:
             ))
             fig_sankey.update_layout(title_text="Da intenção do colaborador à decisão do gestor (90 dias)", font_size=13)
             with col_sankey:
-                st.plotly_chart(fig_sankey, use_container_width=True)
+                st.plotly_chart(fig_sankey, width="stretch")
                 st.caption("Só inclui quem já respondeu os dois, aos 90 dias.")
