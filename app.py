@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import data
+from streamlit_echarts import st_echarts
 
 st.set_page_config(page_title="Dashboard AVE", page_icon="📊", layout="wide")
 
@@ -103,7 +104,10 @@ def group_progress_card(group: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def check_login(username: str, password: str) -> list[str] | None:
-    users = st.secrets.get("users", {})
+    try:
+        users = st.secrets.get("users", {})
+    except Exception:
+        users = {}
     user = users.get(username)
     if user and user.get("password") == password:
         return user.get("tenants", [])
@@ -116,6 +120,12 @@ if "authenticated_user" not in st.session_state:
 
 if not st.session_state.authenticated_user:
     st.title("📊 Dashboard AVE")
+    try:
+        configured = bool(st.secrets.get("users", {}))
+    except Exception:
+        configured = False
+    if not configured:
+        st.warning("Nenhum usuário configurado. Crie .streamlit/secrets.toml seguindo o README. O acesso ao painel é separado do login da API.")
     with st.form("login"):
         username = st.text_input("Usuário")
         password = st.text_input("Senha", type="password")
@@ -155,67 +165,67 @@ with ctrl_cols[3]:
 
 st.title(f"📊 Dashboard AVE — {client['display_name']}")
 
-# ---------------------------------------------------------------------------
-# Opções de filtro (gestores/áreas vêm de endpoint próprio, com id do gestor
-# pra poder filtrar os KPIs agregados direto na API, não só localmente)
-# ---------------------------------------------------------------------------
+# Mostra uma mensagem útil antes de tentar autenticar na API.
+try:
+    api_credentials = st.secrets.get("mindsight", {})
+except Exception:
+    api_credentials = {}
+if not api_credentials.get("username") or not api_credentials.get("password"):
+    st.error("Configure [mindsight].username e [mindsight].password em .streamlit/secrets.toml para consultar a API.")
+    st.stop()
 
+# ---------------------------------------------------------------------------
+# Filtros de área e gestor. Sem filtro mensal: o período de conclusão
+# não está disponível na API consultada.
+# ---------------------------------------------------------------------------
 round_args = (client["auth_url"], client["api_base"], client["tenant"], client["evaluation_round_id"])
-managers = data.fetch_managers(*round_args)
-areas_list = data.fetch_areas(*round_args)
-manager_name_to_id = {m["name"]: m["id"] for m in managers if m["name"]}
+try:
+    pairs = data.fetch_admin_evaluation_pairs(*round_args)
+    grades = data.fetch_grades(*round_args)
+    managers = data.fetch_managers(*round_args)
+    areas_list = data.fetch_areas(*round_args)
+except Exception:
+    st.error("Não foi possível consultar a API da Mindsight. Verifique as credenciais, permissões, conectividade e o ID da rodada no clients.json.")
+    st.stop()
 
+attrs_by_key = data.build_evaluated_attributes_map(pairs)
+manager_name_to_id = {m["name"]: m["id"] for m in managers if m.get("name")}
 if "filter_reset_counter" not in st.session_state:
     st.session_state.filter_reset_counter = 0
 
-f_col1, f_col2, f_col3 = st.columns([3, 3, 1])
+f_col1, f_col2, f_col3 = st.columns([3, 3, 1.5])
 with f_col1:
     st.caption("Área")
-    area_label = st.selectbox(
-        "Área", ["Todas as áreas"] + areas_list,
-        key=f"area_filter_{st.session_state.filter_reset_counter}",
-        label_visibility="collapsed",
-    )
+    area_label = st.selectbox("Área", ["Todas as áreas"] + areas_list,
+        key=f"area_filter_{st.session_state.filter_reset_counter}", label_visibility="collapsed")
 with f_col2:
-    st.caption("Gestor")
-    gestor_label = st.selectbox(
-        "Gestor", ["Todos os gestores"] + list(manager_name_to_id.keys()),
-        key=f"gestor_filter_{st.session_state.filter_reset_counter}",
-        label_visibility="collapsed",
-    )
+    st.caption("Gestor(a)")
+    gestor_label = st.selectbox("Gestor(a)", ["Todos os gestores"] + list(manager_name_to_id.keys()),
+        key=f"gestor_filter_{st.session_state.filter_reset_counter}", label_visibility="collapsed")
 with f_col3:
-    st.caption("​")  # espaço invisível -- só pra ocupar a mesma altura do rótulo das outras colunas
+    st.caption("​")
     if st.button("🔄 Limpar filtros", use_container_width=True):
         st.session_state.filter_reset_counter += 1
         st.rerun()
+
 selected_area = None if area_label == "Todas as áreas" else area_label
 selected_gestor = None if gestor_label == "Todos os gestores" else gestor_label
-selected_manager_id = manager_name_to_id.get(selected_gestor) if selected_gestor else None
-
-# ---------------------------------------------------------------------------
-# KPIs agregados (summary_stats) -- filtrados DE VERDADE na API
-# ---------------------------------------------------------------------------
-
-summary = data.fetch_summary_stats(*round_args, manager_id=selected_manager_id, area=selected_area)
-
-# ---------------------------------------------------------------------------
-# Dados detalhados (grades/pairs) -- filtro local por nome, mesma seleção
-# ---------------------------------------------------------------------------
-
-pairs = data.fetch_admin_evaluation_pairs(*round_args)
-grades = data.fetch_grades(*round_args)
-
-attrs_by_key = data.build_evaluated_attributes_map(pairs)
-
 filtered_keys = {
     key for key, attrs in attrs_by_key.items()
     if (selected_area is None or attrs["area"] == selected_area)
     and (selected_gestor is None or attrs["gestor"] == selected_gestor)
 }
+filtered_pairs = data.filter_pairs(pairs, filtered_keys)
+summary = data.status_summary(filtered_pairs)
+pending_split = data.pending_by_respondent(filtered_pairs)
+pair_detail_df = pd.DataFrame(data.detail_rows(filtered_pairs, attrs_by_key))
+people_by_key = {p["evaluated"]["key"]: p["evaluated"].get("name", "Nome indisponível")
+                 for p in filtered_pairs if (p.get("evaluated") or {}).get("key")}
 
+# O conjunto de respostas é filtrado pelas pessoas do recorte atual.
 grades_df_all = pd.DataFrame(grades)
 grades_df = (
-    grades_df_all[grades_df_all["evaluated_key"].isin(filtered_keys)]
+    grades_df_all[grades_df_all["evaluated_key"].isin(filtered_keys)].copy()
     if not grades_df_all.empty else grades_df_all
 )
 
@@ -226,17 +236,162 @@ specific_df = scores_df[~scores_df["label"].isin(competency_labels)] if not scor
 
 decision_rows = grades_df[grades_df["question"].isin(data.DECISION_QUESTIONS.values())] if not grades_df.empty else pd.DataFrame()
 intention_rows = grades_df[grades_df["question"] == data.INTENTION_QUESTION["question_text"]] if not grades_df.empty else pd.DataFrame()
-
 overall_avg = competency_df["score"].mean() if not competency_df.empty else None
-pct_continua = None
 outcomes_all = None
+pct_continua = None
 if not decision_rows.empty:
     outcomes_all = decision_rows["answer"].map(data.DECISION_OUTCOME)
-    pct_continua = (outcomes_all == "continua").mean() * 100
+    known = outcomes_all.dropna()
+    pct_continua = (known == "continua").mean() * 100 if len(known) else None
 pct_deseja = (intention_rows["answer"] == "Sim").mean() * 100 if not intention_rows.empty else None
 
+
+def show_people_for_grades(rows: pd.DataFrame, label: str):
+    """Mostra as pessoas, sem misturar respostas de outra pergunta/grupo."""
+    if rows.empty:
+        st.info("Nenhuma pessoa encontrada para este resultado.")
+        return
+    table = rows[["evaluated_key", "evaluation_group_key", "answer"]].copy()
+    table["Colaborador(a)"] = table["evaluated_key"].map(people_by_key).fillna("Nome indisponível")
+    table["Gestor(a)"] = table["evaluated_key"].map({k: v.get("gestor", "") for k, v in attrs_by_key.items()}).fillna("")
+    table["Etapa"] = table["evaluation_group_key"].map(
+        {k: v[1] for k, v in data.GROUP_META.items()}).fillna("Não identificada")
+    table = table.rename(columns={"answer": "Resposta"})
+    table = table[["Colaborador(a)", "Gestor(a)", "Etapa", "Resposta"]].drop_duplicates()
+    st.markdown(f"**{label} — {len(table)} registro(s)**")
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+
+def mostrar_pessoas_ao_clicar_rosquinha(fig: go.Figure, respostas: pd.DataFrame, chave: str):
+    """Exibe a rosquinha com ECharts e detalha a fatia clicada.
+
+    Só as rosquinhas de decisões usam ECharts. Os demais gráficos e abas
+    continuam como antes. A chave muda com cliente, rodada, área e gestor(a),
+    evitando reaproveitar uma seleção de outro recorte.
+    """
+    pizza = fig.data[0]
+    etiquetas = [str(etiqueta) for etiqueta in pizza.labels]
+    valores = [int(valor) for valor in pizza.values]
+
+    opcoes = {
+        "title": {
+            "text": fig.layout.title.text or "",
+            "left": "left",
+            "top": 6,
+            "textStyle": {"fontSize": 16, "fontWeight": 500, "color": "#333333"},
+        },
+        "tooltip": {"trigger": "item", "formatter": "{b}: {c} ({d}%)"},
+        "legend": {
+            "type": "scroll", "bottom": 0, "left": "center",
+            "itemWidth": 11, "itemHeight": 11,
+            "textStyle": {"fontSize": 11},
+        },
+        "series": [{
+            "name": "Decisões", "type": "pie",
+            "radius": ["48%", "70%"], "center": ["50%", "44%"],
+            "avoidLabelOverlap": True,
+            "label": {
+                "show": True, "position": "inside", "formatter": "{d}%\n{c}",
+                "fontSize": 12, "fontWeight": 600, "color": "#FFFFFF",
+            },
+            "labelLine": {"show": False},
+            "emphasis": {"scale": True, "scaleSize": 5},
+            "data": [
+                {"name": etiqueta, "value": valor,
+                 "itemStyle": {"color": answer_color(etiqueta)}}
+                for etiqueta, valor in zip(etiquetas, valores)
+            ],
+        }],
+    }
+
+    contexto = f"{client['tenant']}_{client['evaluation_round_id']}_{selected_area}_{selected_gestor}"
+    chave_grafico = f"rosquinha_{chave}_{contexto}"
+    evento = st_echarts(
+        options=opcoes,
+        height="450px",
+        key=chave_grafico,
+        events={"click": "function(params) { return params.componentType === 'series' && params.seriesType === 'pie' ? params.name : null; }"},
+    )
+    # streamlit-echarts >= 0.7.0 expõe o retorno em chart_event.
+    # O teste com dict também facilita compatibilidade com retornos mapeáveis.
+    selecionada_no_clique = (
+        evento.get("chart_event") if isinstance(evento, dict)
+        else getattr(evento, "chart_event", None)
+    )
+    chave_selecao = f"fatia_selecionada_{chave_grafico}"
+    if selecionada_no_clique in etiquetas:
+        st.session_state[chave_selecao] = selecionada_no_clique
+
+    selecionada = st.session_state.get(chave_selecao)
+    if selecionada in etiquetas:
+        pessoas = respostas[respostas["answer"].astype(str) == selecionada]
+        show_people_for_grades(pessoas, selecionada)
+
+
+def clickable_results(
+    rows: pd.DataFrame,
+    key: str,
+    title: str = "Clique em um resultado para ver as pessoas",
+    search_query: str | None = None,
+):
+    """Permite selecionar um resultado e, opcionalmente, procurar pessoas nele.
+
+    As contagens da tabela permanecem referentes ao recorte do dashboard.
+    Quando existe busca sem resultado selecionado, mostra todos os resultados
+    associados ao nome buscado; se um grupo está selecionado, combina os dois.
+    """
+    if rows.empty:
+        st.caption("Nenhuma resposta neste recorte.")
+        return
+    counts = rows.groupby("answer")["evaluated_key"].nunique().reset_index(name="Pessoas")
+    counts = counts.rename(columns={"answer": "Resultado"}).sort_values("Pessoas", ascending=False).reset_index(drop=True)
+    st.caption(title)
+    # Muda a chave somente quando o usuário solicita limpar a seleção. Assim,
+    # digitar um nome não apaga o resultado selecionado anteriormente.
+    revision_key = f"{key}_selection_revision"
+    table_key = f"{key}_{st.session_state.get(revision_key, 0)}" if search_query is not None else key
+    selection = st.dataframe(
+        counts, use_container_width=True, hide_index=True,
+        on_select="rerun", selection_mode="single-row", key=table_key,
+    )
+    selected_value = None
+    if selection.selection.rows and selection.selection.rows[0] < len(counts):
+        selected_value = counts.iloc[selection.selection.rows[0]]["Resultado"]
+
+    if search_query is not None and selected_value is not None:
+        st.caption(f"Resultado selecionado: {selected_value}. A busca por nome é aplicada dentro desse resultado.")
+        if st.button("Limpar resultado selecionado", key=f"{key}_clear_selection"):
+            st.session_state[revision_key] = st.session_state.get(revision_key, 0) + 1
+            st.rerun()
+
+    if selected_value is None and not (search_query and search_query.strip()):
+        return
+
+    visible_rows = rows[rows["answer"] == selected_value] if selected_value is not None else rows
+    if search_query and search_query.strip():
+        allowed_people = data.matching_person_keys(search_query, people_by_key, attrs_by_key)
+        visible_rows = visible_rows[visible_rows["evaluated_key"].isin(allowed_people)]
+        if visible_rows.empty:
+            st.info("Nenhum(a) colaborador(a) ou gestor(a) encontrado(a) para essa busca neste resultado. "
+                    "Tente outro nome ou limpe a seleção de resultado.")
+            return
+    show_people_for_grades(
+        visible_rows,
+        str(selected_value) if selected_value is not None else "Pessoas encontradas pela busca",
+    )
+
+
+def clickable_pair_details(rows: pd.DataFrame, key: str):
+    if rows.empty:
+        st.info("Nenhuma avaliação para o filtro selecionado.")
+        return
+    st.dataframe(rows.drop(columns=["_key"], errors="ignore"),
+                 use_container_width=True, hide_index=True, key=key)
+
+
 tab_overview, tab_progress, tab_competency, tab_evolution, tab_decision = st.tabs([
-    "📊 Visão Geral", "✅ Andamento e Pendências", "🧭 Competências", "📈 Evolução 45→90 dias", "🎯 Decisão e Intenção",
+    "📊 Visão Geral", "✅ Andamento e Pendências", "🧭 Competências", "📈 Evolução 45→90 dias",
+    "🎯 Decisão e Intenção",
 ])
 
 # ---------------------------------------------------------------------------
@@ -288,98 +443,93 @@ with tab_overview:
                 title="Desfecho geral das decisões",
                 color="resposta", color_discrete_map={a: answer_color(a) for a in counts["resposta"]},
             )
-            fig_donut.update_traces(textinfo="percent+value")
-            st.plotly_chart(fig_donut, use_container_width=True)
+            fig_donut.update_traces(textinfo="percent+value", sort=False)
+            mostrar_pessoas_ao_clicar_rosquinha(fig_donut, decision_rows, "visao_geral")
+
+    with st.expander("👥 Consultar pessoas por resultado, participante ou competência"):
+        st.caption("Selecione um resultado na tabela e/ou pesquise pelo nome. "
+                   "Os filtros de cliente, área e gestor(a) continuam sendo respeitados.")
+        person_name_search = st.text_input(
+            "🔎 Pesquisar por colaborador(a) ou gestor(a)",
+            placeholder="Digite o nome ou parte do nome",
+            key="overall_decision_person_search",
+        )
+        if not decision_rows.empty:
+            clickable_results(
+                decision_rows, "overall_decisions",
+                title="Resultados e quantidade de pessoas (sem alterar os totais ao pesquisar)",
+                search_query=person_name_search,
+            )
+        if st.checkbox("Mostrar participantes do recorte", key="show_all_overview"):
+            clickable_pair_details(pair_detail_df.drop_duplicates("_key") if not pair_detail_df.empty else pair_detail_df, "overview_people")
+        if not competency_df.empty:
+            st.caption("Notas por colaborador(a) e competência — selecionadas no detalhamento da aba Competências.")
 
 # ---------------------------------------------------------------------------
 # Aba: Andamento e Pendências
 # ---------------------------------------------------------------------------
 
 with tab_progress:
-    st.subheader("Visão geral da rodada")
+    st.subheader("Status das avaliações — total, colaboradora e gestora")
+    st.caption("Contagem de avaliações individuais, e não de pessoas. Cada pessoa pode ter avaliação de 45 e de 90 dias.")
+    cols = st.columns(5)
+    for col, label, value in zip(cols,
+        ["Participantes", "Avaliações totais", "Pendentes no total", "Pend. colaboradora", "Pend. gestora"],
+        [summary["total_participants"], summary["total_evaluations"],
+         summary["pending_evaluations"], pending_split["Colaboradora"], pending_split["Gestora"]]):
+        with col:
+            st.metric(label, value)
+    if pending_split["Não classificada"]:
+        st.warning(f"Mais {pending_split['Não classificada']} pendência(s) sem tipo reconhecido, já incluídas no total.")
+    st.progress(summary["completed_percentage"] / 100 if summary["total_evaluations"] else 0,
+                text=f"{summary['completed_evaluations']} de {summary['total_evaluations']} avaliações concluídas ({summary['completed_percentage']}%)")
 
-    cols = st.columns(4)
-    with cols[0]:
-        st.markdown(metric_card("👥", "Total de participantes", str(summary["total_participants"]), INFO), unsafe_allow_html=True)
-    with cols[1]:
-        st.markdown(metric_card("📄", "Total de avaliações", str(summary["total_evaluations"]), PRIMARY), unsafe_allow_html=True)
-    with cols[2]:
-        st.markdown(metric_card("✅", "Avaliações completas", f"{summary['completed_percentage']}%", SUCCESS), unsafe_allow_html=True)
-    with cols[3]:
-        st.markdown(metric_card("⏰", "Avaliações pendentes", str(summary["pending_evaluations"]), DANGER), unsafe_allow_html=True)
+    st.subheader("Pendências separadas por responsável")
+    left, right = st.columns(2)
+    with left:
+        with st.container(border=True):
+            st.markdown(f"**Colaboradora — {pending_split['Colaboradora']} pendência(s)**")
+            if st.checkbox("Ver quem ainda precisa responder a autoavaliação", key="see_employee_pending"):
+                clickable_pair_details(pair_detail_df[(pair_detail_df["Status"] == "Pendente") &
+                    (pair_detail_df["Responsável"] == "Colaboradora")] if not pair_detail_df.empty else pd.DataFrame(), "employee_pending")
+    with right:
+        with st.container(border=True):
+            st.markdown(f"**Gestora — {pending_split['Gestora']} pendência(s)**")
+            if st.checkbox("Ver quais avaliações a gestora ainda precisa fazer", key="see_manager_pending"):
+                clickable_pair_details(pair_detail_df[(pair_detail_df["Status"] == "Pendente") &
+                    (pair_detail_df["Responsável"] == "Gestora")] if not pair_detail_df.empty else pd.DataFrame(), "manager_pending")
 
-    st.markdown("####")
     st.subheader("Status por grupo avaliativo")
     groups = summary["groups"]
     for i in range(0, len(groups), 2):
-        row_groups = groups[i:i + 2]
         row_cols = st.columns(2)
-        for col, group in zip(row_cols, row_groups):
+        for col, group in zip(row_cols, groups[i:i + 2]):
             with col:
                 st.markdown(group_progress_card(group), unsafe_allow_html=True)
 
     st.divider()
-    st.subheader("Pendências por pessoa")
-
+    st.subheader("Pendências por pessoa — selecione uma linha para detalhar")
+    person_rows = data.person_summary(filtered_pairs, attrs_by_key)
     search_name = st.text_input("🔎 Buscar por nome", placeholder="Digite parte do nome do colaborador")
-
-    person_records: dict[str, dict] = {}
-    for p in pairs:
-        key = p["evaluated"]["key"]
-        if key not in filtered_keys:
-            continue
-        rec = person_records.setdefault(key, {"Participante": p["evaluated"]["name"], "Avaliações": 0, "Pendências": 0})
-        rec["Avaliações"] += 1
-        if p["is_pending"]:
-            rec["Pendências"] += 1
-
-    gestor_by_key: dict[str, str] = {}
-    for p in pairs:
-        if "Gestor" in p["evaluation_group"]:
-            gestor_by_key.setdefault(p["evaluated"]["key"], p["appraiser"]["name"])
-
-    person_rows = []
-    for key, rec in person_records.items():
-        total = rec["Avaliações"]
-        pend = rec["Pendências"]
-        pct = round((total - pend) / total * 100) if total else 0
-        person_rows.append({
-            "Participante": rec["Participante"],
-            "Gestor": gestor_by_key.get(key, ""),
-            "Avaliações": total,
-            "Pendências": pend,
-            "% Conclusão": pct,
-        })
-
     if person_rows:
-        person_df = pd.DataFrame(person_rows).sort_values("Pendências", ascending=False)
+        person_df = pd.DataFrame(person_rows)
         if search_name:
-            person_df = person_df[person_df["Participante"].str.contains(search_name, case=False, na=False)]
-        st.dataframe(
-            person_df, use_container_width=True, hide_index=True,
-            column_config={
-                "% Conclusão": st.column_config.ProgressColumn("% Conclusão", min_value=0, max_value=100, format="%d%%"),
-            },
-        )
+            person_df = person_df[person_df["Participante"].str.contains(search_name, case=False, regex=False, na=False)]
+        person_df = person_df.reset_index(drop=True)
+        event = st.dataframe(person_df.drop(columns=["_key"]), hide_index=True, use_container_width=True,
+            on_select="rerun", selection_mode="single-row", key="people_pending_table",
+            column_config={"% Conclusão": st.column_config.ProgressColumn(
+                "% Conclusão", min_value=0, max_value=100, format="%d%%")})
+        if event.selection.rows and event.selection.rows[0] < len(person_df):
+            key = person_df.iloc[event.selection.rows[0]]["_key"]
+            st.markdown(f"**Avaliações de {person_df.iloc[event.selection.rows[0]]['Participante']}**")
+            clickable_pair_details(pair_detail_df[pair_detail_df["_key"] == key], "selected_person_pairs")
     else:
-        st.info("Nenhum participante pros filtros selecionados.")
+        st.info("Nenhuma pessoa para os filtros selecionados.")
 
-    with st.expander("📋 Detalhamento: quais grupos cada pessoa ainda precisa avaliar"):
-        pending_rows = [
-            {
-                "Colaborador": p["evaluated"]["name"],
-                "Gestor": p["appraiser"]["name"],
-                "Grupo": p["evaluation_group"],
-                "Área": (p.get("additional_info") or {}).get("area") or "(sem área)",
-                "Cargo": (p.get("additional_info") or {}).get("role") or "",
-            }
-            for p in pairs
-            if p["is_pending"] and p["evaluated"]["key"] in filtered_keys
-        ]
-        if pending_rows:
-            st.dataframe(pd.DataFrame(pending_rows), use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhuma pendência pros filtros selecionados.")
+    with st.expander("📋 Todas as avaliações pendentes — com responsável e etapa"):
+        pending_df = pair_detail_df[pair_detail_df["Status"] == "Pendente"] if not pair_detail_df.empty else pd.DataFrame()
+        clickable_pair_details(pending_df, "all_pending")
 
 # ---------------------------------------------------------------------------
 # Aba: Resultados por Competência
@@ -408,6 +558,22 @@ with tab_competency:
             showlegend=True,
         )
         st.plotly_chart(fig_radar, use_container_width=True)
+
+        with st.expander("👥 Clique na competência para conferir pessoas e notas"):
+            detail = competency_df.copy()
+            detail["Colaborador(a)"] = detail["evaluated_key"].map(people_by_key).fillna("Nome indisponível")
+            aggregated = (detail.groupby(["respondent", "label"], as_index=False)
+                .agg(**{"Nota média": ("score", "mean"), "Pessoas": ("evaluated_key", "nunique")}))
+            aggregated["Nota média"] = aggregated["Nota média"].round(2)
+            aggregated = aggregated.rename(columns={"respondent": "Responsável", "label": "Competência"})
+            selection = st.dataframe(aggregated, hide_index=True, use_container_width=True,
+                on_select="rerun", selection_mode="single-row", key="competency_group_rows")
+            if selection.selection.rows and selection.selection.rows[0] < len(aggregated):
+                line = aggregated.iloc[selection.selection.rows[0]]
+                individual = detail[(detail["respondent"] == line["Responsável"]) &
+                                    (detail["label"] == line["Competência"])]
+                st.dataframe(individual[["Colaborador(a)", "round", "score"]].rename(columns={"round":"Etapa", "score":"Nota"}),
+                    hide_index=True, use_container_width=True)
 
         st.markdown("**O que isso quer dizer, em números:**")
         for label in COMPETENCY_ORDER:
@@ -470,6 +636,15 @@ with tab_evolution:
                 if not any_data:
                     st.caption("Sem dados suficientes ainda.")
 
+    if not competency_df.empty:
+        with st.expander("👥 Ver notas individuais dos 45 e 90 dias"):
+            comp_label = st.selectbox("Competência", COMPETENCY_ORDER, key="evolution_comp")
+            eval_rows = competency_df[competency_df["label"] == comp_label].copy()
+            eval_rows["Colaborador(a)"] = eval_rows["evaluated_key"].map(people_by_key).fillna("Nome indisponível")
+            st.dataframe(eval_rows[["Colaborador(a)", "respondent", "round", "score"]].rename(
+                columns={"respondent": "Responsável", "round": "Etapa", "score": "Nota"}),
+                use_container_width=True, hide_index=True)
+
 # ---------------------------------------------------------------------------
 # Aba: Decisão Final e Intenção
 # ---------------------------------------------------------------------------
@@ -492,9 +667,10 @@ with tab_decision:
                 color="decisão", color_discrete_map={a: answer_color(a) for a in counts["decisão"]},
                 title=f"{data.GROUP_DISPLAY_NAMES[group_key]}",
             )
-            fig.update_traces(textinfo="percent+value")
+            fig.update_traces(textinfo="percent+value", sort=False)
             with col:
-                st.plotly_chart(fig, use_container_width=True)
+                mostrar_pessoas_ao_clicar_rosquinha(fig, rows, f"decisao_{group_key}")
+                clickable_results(rows, f"decision_{group_key}")
         st.caption("Tons de verde = continuidade/efetivação (mais escuro = plena, mais claro = com ressalva/plano). Vermelho = desligamento.")
 
         st.divider()
@@ -521,6 +697,7 @@ with tab_decision:
             fig_sat.update_layout(showlegend=False)
             with col_sat:
                 st.plotly_chart(fig_sat, use_container_width=True)
+                clickable_results(sat_rows, "satisfaction_results")
 
         intention_rows2 = grades_df[
             (grades_df["evaluation_group_key"] == data.INTENTION_QUESTION["group_key"])

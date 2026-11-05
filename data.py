@@ -8,6 +8,8 @@ Catalogo de perguntas: confirmado via repr() direto da API em 2026-09-27
 """
 
 import json
+from collections import defaultdict
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -112,17 +114,21 @@ def fetch_grades(auth_url: str, api_base: str, tenant: str, round_id: str) -> li
 
 
 def build_evaluated_attributes_map(pairs: list[dict]) -> dict[str, dict]:
-    """evaluated_key -> {area, role, gestor}, pra filtrar grades por area/gestor
-    (a API de grades nao traz isso direto)."""
+    """Metadados da pessoa. O gestor vem da avaliação do gestor, nunca da autoavaliação."""
     attrs: dict[str, dict] = {}
     for pair in pairs:
-        key = pair["evaluated"]["key"]
+        evaluated = pair.get("evaluated") or {}
+        key = evaluated.get("key")
+        if not key:
+            continue
         info = pair.get("additional_info") or {}
-        attrs[key] = {
-            "area": info.get("area") or "(sem área)",
-            "role": info.get("role") or "",
-            "gestor": pair["appraiser"]["name"],
-        }
+        item = attrs.setdefault(key, {"area": "", "role": "", "gestor": ""})
+        item["area"] = item["area"] or info.get("area") or ""
+        item["role"] = item["role"] or info.get("role") or ""
+        if respondent(pair) == "Gestora":
+            item["gestor"] = (pair.get("appraiser") or {}).get("name") or item["gestor"]
+    for item in attrs.values():
+        item["area"] = item["area"] or "(sem área)"
     return attrs
 
 
@@ -276,3 +282,151 @@ def build_scores_dataframe(grades: list[dict]) -> pd.DataFrame:
         })
 
     return pd.DataFrame(rows)
+
+# ---------------------------------------------------------------------------
+# Auxiliares do dashboard. Mantidos em data.py para preservar a estrutura
+# original, sem dependência de um novo módulo dashboard_utils.py.
+# ---------------------------------------------------------------------------
+
+"""Funções auxiliares para agrupamentos, pendências e busca por nome na AVE.
+
+Não utilizam acesso à API nem ao Streamlit.
+"""
+
+GROUP_META = {
+    "avaliacaodogestor45dias": ("Gestora", "45 dias", "Avaliação da gestora — 45 dias"),
+    "avaliacaodogestor90dias": ("Gestora", "90 dias", "Avaliação da gestora — 90 dias"),
+    "autoavaliacao45dias": ("Colaboradora", "45 dias", "Autoavaliação — 45 dias"),
+    "autoavaliacao90dias": ("Colaboradora", "90 dias", "Autoavaliação — 90 dias"),
+}
+
+def _normalize(value):
+    value = unicodedata.normalize("NFKD", str(value or ""))
+    return "".join(c for c in value if not unicodedata.combining(c)).casefold()
+
+
+def matching_person_keys(query: str, names_by_key: dict, attrs_by_key: dict) -> set:
+    """Busca em nomes de colaborador(a) ou gestor(a), ignorando acentos e caixa.
+
+    Recebe apenas o conjunto de pessoas já autorizado pelos filtros do painel.
+    A busca não altera os totais gerais; restringe somente o detalhamento.
+    """
+    search = _normalize(" ".join(str(query or "").split()))
+    if not search:
+        return set(names_by_key)
+    return {
+        key for key, name in names_by_key.items()
+        if search in _normalize(name)
+        or search in _normalize((attrs_by_key.get(key) or {}).get("gestor"))
+    }
+
+
+def group_key(pair: dict) -> str | None:
+    group = pair.get("evaluation_group_key") or pair.get("evaluation_group") or ""
+    if isinstance(group, dict):
+        group = group.get("key") or group.get("slug") or group.get("name") or ""
+    normalized = "".join(c for c in _normalize(group) if c.isalnum())
+    if normalized in GROUP_META:
+        return normalized
+    if "gestor" in normalized or "gestora" in normalized:
+        return "avaliacaodogestor90dias" if "90" in normalized else "avaliacaodogestor45dias" if "45" in normalized else None
+    if "autoavaliacao" in normalized or "colaborador" in normalized:
+        return "autoavaliacao90dias" if "90" in normalized else "autoavaliacao45dias" if "45" in normalized else None
+    return None
+
+
+def respondent(pair: dict) -> str:
+    key = group_key(pair)
+    return GROUP_META[key][0] if key else "Não classificada"
+
+
+def stage(pair: dict) -> str:
+    key = group_key(pair)
+    return GROUP_META[key][1] if key else "Não identificada"
+
+
+def filter_pairs(pairs: list[dict], allowed_keys: set[str]) -> list[dict]:
+    return [p for p in pairs if (p.get("evaluated") or {}).get("key") in allowed_keys]
+
+
+def status_summary(pairs: list[dict]) -> dict:
+    by_group = defaultdict(lambda: {"completed": 0, "pending": 0})
+    for p in pairs:
+        key = group_key(p) or str(p.get("evaluation_group") or "Não classificado")
+        by_group[key]["pending" if p.get("is_pending") else "completed"] += 1
+    groups = []
+    for name, count in sorted(by_group.items()):
+        total = count["pending"] + count["completed"]
+        groups.append({
+            "name": name,
+            **count,
+            "completed_percentage": round(100 * count["completed"] / total, 1) if total else 0,
+            "pending_percentage": round(100 * count["pending"] / total, 1) if total else 0,
+        })
+    total = len(pairs)
+    pending = sum(bool(p.get("is_pending")) for p in pairs)
+    return {
+        "total_participants": len({(p.get("evaluated") or {}).get("key") for p in pairs if (p.get("evaluated") or {}).get("key")}),
+        "total_evaluations": total,
+        "completed_evaluations": total - pending,
+        "pending_evaluations": pending,
+        "completed_percentage": round(100 * (total - pending) / total, 1) if total else 0,
+        "groups": groups,
+    }
+
+
+def pending_by_respondent(pairs: list[dict]) -> dict[str, int]:
+    counts = {"Gestora": 0, "Colaboradora": 0, "Não classificada": 0}
+    for p in pairs:
+        if p.get("is_pending"):
+            counts[respondent(p)] += 1
+    return counts
+
+
+def detail_rows(pairs: list[dict], attrs_by_key: dict | None = None) -> list[dict]:
+    attrs_by_key = attrs_by_key or {}
+    rows = []
+    for p in pairs:
+        evaluated = p.get("evaluated") or {}
+        evaluator = p.get("appraiser") or {}
+        info = p.get("additional_info") or {}
+        attrs = attrs_by_key.get(evaluated.get("key"), {})
+        rows.append({
+            "Colaborador(a)": evaluated.get("name") or "Nome indisponível",
+            "Gestor(a)": attrs.get("gestor") or (evaluator.get("name") if respondent(p) == "Gestora" else "") or "Não informado",
+            "Responsável": "Gestora" if respondent(p) == "Gestora" else "Colaboradora" if respondent(p) == "Colaboradora" else "Não classificada",
+            "Etapa": stage(p),
+            "Grupo": GROUP_META.get(group_key(p), (None, None, str(p.get("evaluation_group") or "Não informado")))[2],
+            "Status": "Pendente" if p.get("is_pending") else "Concluída",
+            "Área": info.get("area") or attrs.get("area") or "Não informada",
+            "Cargo": info.get("role") or attrs.get("role") or "",
+            "_key": evaluated.get("key"),
+        })
+    return rows
+
+
+def person_summary(pairs: list[dict], attrs_by_key: dict) -> list[dict]:
+    person = {}
+    for p in pairs:
+        evaluated = p.get("evaluated") or {}
+        key = evaluated.get("key")
+        if not key:
+            continue
+        attrs = attrs_by_key.get(key, {})
+        record = person.setdefault(key, {
+            "Participante": evaluated.get("name") or "Nome indisponível",
+            "Gestor": attrs.get("gestor") or "Não informado",
+            "Avaliações": 0, "Pend. colaboradora": 0, "Pend. gestora": 0, "Pend. não classificadas": 0,
+        })
+        record["Avaliações"] += 1
+        if p.get("is_pending"):
+            bucket = {"Gestora": "Pend. gestora", "Colaboradora": "Pend. colaboradora"}.get(respondent(p), "Pend. não classificadas")
+            record[bucket] += 1
+    result = []
+    for key, record in person.items():
+        row = dict(record)
+        row["Pendências totais"] = row["Pend. colaboradora"] + row["Pend. gestora"] + row["Pend. não classificadas"]
+        row["% Conclusão"] = round(100 * (row["Avaliações"] - row["Pendências totais"]) / row["Avaliações"])
+        row["_key"] = key
+        result.append(row)
+    return sorted(result, key=lambda r: (-r["Pendências totais"], r["Participante"]))
